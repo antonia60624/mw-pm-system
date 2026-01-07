@@ -367,7 +367,7 @@ export default function Page() {
     fontSize: 14,
   };
 
-  return (
+  return 
     <div style={{ background: "#f6f7f9", minHeight: "100vh", padding: 22, fontFamily: "system-ui" }}>
       <div style={{ maxWidth: 1180, margin: "0 auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
