@@ -1,729 +1,731 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { supabase } from "../lib/supabase";
-import {
-  DndContext,
-  closestCenter,
-  PointerSensor,
-  useSensor,
-  useSensors,
-  DragEndEvent,
-} from "@dnd-kit/core";
-import {
-  SortableContext,
-  verticalListSortingStrategy,
-  useSortable,
-  arrayMove,
-} from "@dnd-kit/sortable";
-import { CSS } from "@dnd-kit/utilities";
+import { useRouter } from "next/navigation";
+import { supabase } from "../../lib/supabase";
+import { getMyProfile, type Profile } from "../../lib/profile";
 
 type Workstream = {
   id: string;
-  name: "兒少組" | "研發組" | "數位推廣組" | "行政組" | string;
-  color: string | null;
-  sort_order: number | null;
+  name: string;
+  color: string;
+  sort_order: number;
 };
 
 type Project = {
   id: string;
-  title: string;
+  workstream_id: string | null;
+  name: string;
   status: string | null;
+  sort_order: number;
   created_at: string;
-  workstream_id: string;
-  sort_order: number | null;
 };
 
 type Task = {
   id: string;
-  project_id: string;
+  project_id: string | null;
   title: string;
-  due_date: string | null; // yyyy-mm-dd
   assignee: string | null;
-  done: boolean | null;
-  sort_order: number | null;
+  due_date: string | null; // date -> string
+  done: boolean;
+  sort_order: number;
   created_at: string;
 };
 
-const WS_COLORS: Record<string, string> = {
-  兒少組: "#2563eb", // blue
-  研發組: "#16a34a", // green
-  數位推廣組: "#7c3aed", // purple
-  行政組: "#ea580c", // orange
+const card: React.CSSProperties = {
+  border: "1px solid #e8e8e8",
+  borderRadius: 18,
+  padding: 16,
+  background: "white",
 };
 
-function formatYMD(d: Date) {
+const btn: React.CSSProperties = {
+  padding: "10px 12px",
+  borderRadius: 12,
+  border: "1px solid #111",
+  cursor: "pointer",
+  fontWeight: 900,
+  background: "white",
+};
+
+const smallBtn: React.CSSProperties = {
+  padding: "6px 8px",
+  borderRadius: 10,
+  border: "1px solid #111",
+  cursor: "pointer",
+  fontWeight: 900,
+  background: "white",
+};
+
+function ymd(d: Date) {
   const y = d.getFullYear();
   const m = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${day}`;
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${dd}`;
 }
 
-function startOfMonth(d: Date) {
-  return new Date(d.getFullYear(), d.getMonth(), 1);
-}
-function addMonths(d: Date, diff: number) {
-  return new Date(d.getFullYear(), d.getMonth() + diff, 1);
+function weekdayShort(d: Date) {
+  const map = ["日", "一", "二", "三", "四", "五", "六"];
+  return map[d.getDay()];
 }
 
-function SortableRow({
-  id,
-  children,
-}: {
-  id: string;
-  children: (p: {
-    attributes: any;
-    listeners: any;
-    setNodeRef: (el: HTMLElement | null) => void;
-    transform: any;
-    transition: string | undefined;
-    isDragging: boolean;
-  }) => React.ReactNode;
-}) {
-  const s = useSortable({ id });
-  return (
-    <>
-      {children({
-        attributes: s.attributes,
-        listeners: s.listeners,
-        setNodeRef: s.setNodeRef,
-        transform: s.transform,
-        transition: s.transition,
-        isDragging: s.isDragging,
-      })}
-    </>
-  );
-}
-
-export default function Page() {
-  const [email, setEmail] = useState<string>("");
-  const [role, setRole] = useState<string>("");
+export default function ProjectsPage() {
+  const router = useRouter();
+  const [me, setMe] = useState<Profile | null>(null);
 
   const [workstreams, setWorkstreams] = useState<Workstream[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
 
-  // ✅ Project 新增：title + workstream 必填
-  const [newProjectTitle, setNewProjectTitle] = useState("");
-  const [newProjectWs, setNewProjectWs] = useState<string>("");
+  const [wsName, setWsName] = useState("兒少組");
+  const [newProjectByWs, setNewProjectByWs] = useState<Record<string, string>>(
+    {}
+  );
 
-  // ✅ Task 新增：每個 project 自己一組輸入（不連動）
-  const [draftTask, setDraftTask] = useState<
-    Record<
-      string,
-      { title: string; due_date: string; assignee: string }
-    >
+  const [newTaskTitleByProject, setNewTaskTitleByProject] = useState<
+    Record<string, string>
+  >({});
+  const [newTaskDueByProject, setNewTaskDueByProject] = useState<
+    Record<string, string>
+  >({});
+  const [newTaskAssigneeByProject, setNewTaskAssigneeByProject] = useState<
+    Record<string, string>
   >({});
 
-  // 月曆月份
-  const [monthBase, setMonthBase] = useState<Date>(() => startOfMonth(new Date()));
+  const [monthCursor, setMonthCursor] = useState<Date>(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
 
-  const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }));
+  const isAdmin = me?.role === "admin";
 
   const wsById = useMemo(() => {
     const m = new Map<string, Workstream>();
-    workstreams.forEach((w) => m.set(w.id, w));
+    for (const w of workstreams) m.set(w.id, w);
     return m;
   }, [workstreams]);
 
-  const colorByWsId = (wsId: string) => {
-    const ws = wsById.get(wsId);
-    if (!ws) return "#111";
-    return WS_COLORS[ws.name] ?? "#111";
+  const projectById = useMemo(() => {
+    const m = new Map<string, Project>();
+    for (const p of projects) m.set(p.id, p);
+    return m;
+  }, [projects]);
+
+  const getWsColorByProjectId = (projectId: string | null) => {
+    if (!projectId) return "#111111";
+    const p = projectById.get(projectId);
+    const ws = p?.workstream_id ? wsById.get(p.workstream_id) : undefined;
+    return ws?.color || "#111111";
   };
 
-  const tasksByProject = useMemo(() => {
-    const map = new Map<string, Task[]>();
-    tasks.forEach((t) => {
-      const arr = map.get(t.project_id) ?? [];
-      arr.push(t);
-      map.set(t.project_id, arr);
-    });
-    for (const [k, arr] of map) {
-      arr.sort((a, b) => (a.sort_order ?? 999999) - (b.sort_order ?? 999999));
-      map.set(k, arr);
+  const loadAll = async () => {
+    const { data: s } = await supabase.auth.getSession();
+    if (!s.session) {
+      router.replace("/login");
+      return;
     }
-    return map;
-  }, [tasks]);
 
-  // 月曆格：當月天數
-  const monthDays = useMemo(() => {
-    const d0 = startOfMonth(monthBase);
-    const y = d0.getFullYear();
-    const m = d0.getMonth();
-    const next = new Date(y, m + 1, 1);
-    const days = Math.round((next.getTime() - d0.getTime()) / (1000 * 60 * 60 * 24));
-    return Array.from({ length: days }, (_, i) => new Date(y, m, i + 1));
-  }, [monthBase]);
-
-  // 月曆點點：只顯示「未完成且有 due_date」的 tasks（用 workstream 顏色）
-  const milestoneDots = useMemo(() => {
-    const map = new Map<string, { color: string; count: number }[]>();
-    tasks
-      .filter((t) => !t.done && t.due_date)
-      .forEach((t) => {
-        const p = projects.find((x) => x.id === t.project_id);
-        if (!p) return;
-        const key = t.due_date!;
-        const color = colorByWsId(p.workstream_id);
-        const arr = map.get(key) ?? [];
-        const hit = arr.find((x) => x.color === color);
-        if (hit) hit.count += 1;
-        else arr.push({ color, count: 1 });
-        map.set(key, arr);
-      });
-    return map;
-  }, [tasks, projects]);
-
-  async function loadAll() {
-    const session = await supabase.auth.getSession();
-    const user = session.data.session?.user;
-    setEmail(user?.email ?? "");
-
-    // role（你之前 profiles 有）
-    const prof = await supabase.from("profiles").select("*").maybeSingle();
-    setRole((prof.data as any)?.role ?? "");
+    const profile = await getMyProfile();
+    setMe(profile);
 
     const ws = await supabase
       .from("workstreams")
-      .select("*")
-      .order("sort_order", { ascending: true });
-
-    if (ws.error) {
-      console.error(ws.error);
-    } else {
-      setWorkstreams(ws.data as any);
-      if (!newProjectWs && (ws.data?.[0] as any)?.id) setNewProjectWs((ws.data?.[0] as any).id);
-    }
-
-    const pr = await supabase
-      .from("projects")
-      .select("*")
+      .select("id,name,color,sort_order")
       .order("sort_order", { ascending: true })
       .order("created_at", { ascending: true });
 
-    if (pr.error) console.error(pr.error);
-    else setProjects(pr.data as any);
+    const pj = await supabase
+      .from("projects")
+      .select("id,workstream_id,name,status,sort_order,created_at")
+      .order("sort_order", { ascending: true })
+      .order("created_at", { ascending: true });
 
     const tk = await supabase
       .from("tasks")
-      .select("*")
+      .select("id,project_id,title,assignee,due_date,done,sort_order,created_at")
       .order("sort_order", { ascending: true })
       .order("created_at", { ascending: true });
 
-    if (tk.error) console.error(tk.error);
-    else setTasks(tk.data as any);
-  }
+    setWorkstreams((ws.data || []) as Workstream[]);
+    setProjects((pj.data || []) as Project[]);
+    setTasks((tk.data || []) as Task[]);
+  };
 
   useEffect(() => {
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const isAdmin = role === "admin";
+  const logout = async () => {
+    await supabase.auth.signOut();
+    router.replace("/login");
+  };
 
-  async function addProject() {
-    if (!isAdmin) return alert("只有 admin 可以新增專案");
-    if (!newProjectTitle.trim()) return alert("請輸入專案名稱");
-    if (!newProjectWs) return alert("請選 workstream");
+  // ✅ 1) 不用拖曳：改成「真排序」(↑↓)，不會跳到奇怪畫面
+  const moveProject = async (projectId: string, dir: -1 | 1) => {
+    if (!isAdmin) return alert("只有 admin 可以排序/編輯");
+    const p = projects.find((x) => x.id === projectId);
+    if (!p) return;
 
-    const maxOrder = Math.max(-1, ...projects.map((p) => p.sort_order ?? 0));
-    const ins = await supabase.from("projects").insert({
-      title: newProjectTitle.trim(),
-      status: "active",
-      workstream_id: newProjectWs,
-      sort_order: maxOrder + 1,
+    const siblings = projects
+      .filter((x) => x.workstream_id === p.workstream_id)
+      .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+
+    const idx = siblings.findIndex((x) => x.id === projectId);
+    const j = idx + dir;
+    if (idx < 0 || j < 0 || j >= siblings.length) return;
+
+    const a = siblings[idx];
+    const b = siblings[j];
+
+    const { error: e1 } = await supabase
+      .from("projects")
+      .update({ sort_order: b.sort_order })
+      .eq("id", a.id);
+
+    if (e1) return alert(e1.message);
+
+    const { error: e2 } = await supabase
+      .from("projects")
+      .update({ sort_order: a.sort_order })
+      .eq("id", b.id);
+
+    if (e2) return alert(e2.message);
+
+    await loadAll();
+  };
+
+  const moveTask = async (taskId: string, dir: -1 | 1) => {
+    if (!isAdmin) return alert("只有 admin 可以排序/編輯");
+    const t = tasks.find((x) => x.id === taskId);
+    if (!t) return;
+
+    const siblings = tasks
+      .filter((x) => x.project_id === t.project_id)
+      .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+
+    const idx = siblings.findIndex((x) => x.id === taskId);
+    const j = idx + dir;
+    if (idx < 0 || j < 0 || j >= siblings.length) return;
+
+    const a = siblings[idx];
+    const b = siblings[j];
+
+    const { error: e1 } = await supabase
+      .from("tasks")
+      .update({ sort_order: b.sort_order })
+      .eq("id", a.id);
+
+    if (e1) return alert(e1.message);
+
+    const { error: e2 } = await supabase
+      .from("tasks")
+      .update({ sort_order: a.sort_order })
+      .eq("id", b.id);
+
+    if (e2) return alert(e2.message);
+
+    await loadAll();
+  };
+
+  // ✅ 2) 垃圾桶/刪除都是真的（而且有 confirm）
+  const createWorkstream = async () => {
+    if (!isAdmin) return alert("只有 admin 可以新增");
+    const name = wsName.trim();
+    if (!name) return alert("請輸入組別名稱");
+
+    const { error } = await supabase.from("workstreams").insert({
+      name,
+      // color/sort_order 用 DB default + 我們 SQL 內的 upsert 做維護
     });
 
-    if (ins.error) return alert(`新增失敗：${ins.error.message}`);
-    setNewProjectTitle("");
+    if (error) return alert(error.message);
+    setWsName("");
     await loadAll();
-  }
+  };
 
-  async function deleteProject(id: string) {
-    if (!isAdmin) return alert("只有 admin 可以刪除專案");
-    const ok = confirm("確定刪除這個 Project？（會一併刪除底下 Tasks）");
+  const deleteWorkstream = async (id: string) => {
+    if (!isAdmin) return alert("只有 admin 可以刪除");
+    const ok = confirm("確定要刪除這個 Workstream？底下專案/任務可能也會受影響。");
     if (!ok) return;
 
-    // 先刪 tasks 再刪 project（避免 FK 或殘留）
-    await supabase.from("tasks").delete().eq("project_id", id);
-    const del = await supabase.from("projects").delete().eq("id", id);
-    if (del.error) return alert(`刪除失敗：${del.error.message}`);
+    const { error } = await supabase.from("workstreams").delete().eq("id", id);
+    if (error) return alert(error.message);
     await loadAll();
-  }
+  };
 
-  async function addTask(projectId: string) {
-    if (!isAdmin) return alert("只有 admin 可以新增任務");
-    const d = draftTask[projectId] ?? { title: "", due_date: "", assignee: "" };
-    if (!d.title.trim()) return alert("請輸入任務名稱");
-    if (!d.due_date.trim()) return alert("請選截止日");
-    if (!d.assignee.trim()) return alert("請輸入負責人");
+  const createProject = async (wsId: string) => {
+    if (!isAdmin) return alert("只有 admin 可以新增");
+    const name = (newProjectByWs[wsId] || "").trim();
+    if (!name) return alert("請輸入 Project 名稱");
 
-    const arr = tasksByProject.get(projectId) ?? [];
-    const maxOrder = Math.max(-1, ...arr.map((t) => t.sort_order ?? 0));
+    // 找該 workstream 下一個 sort_order
+    const siblings = projects.filter((p) => p.workstream_id === wsId);
+    const maxOrder = siblings.reduce((m, p) => Math.max(m, p.sort_order ?? 0), 0);
 
-    const ins = await supabase.from("tasks").insert({
-      project_id: projectId,
-      title: d.title.trim(),
-      due_date: d.due_date,
-      assignee: d.assignee.trim(),
-      done: false,
+    const { error } = await supabase.from("projects").insert({
+      workstream_id: wsId,
+      name,
+      status: "active",
       sort_order: maxOrder + 1,
     });
 
-    if (ins.error) return alert(`新增失敗：${ins.error.message}`);
-
-    // ✅ 清掉「該 project」的輸入，不影響其他 project
-    setDraftTask((prev) => ({
-      ...prev,
-      [projectId]: { title: "", due_date: "", assignee: "" },
-    }));
-
+    if (error) return alert(error.message);
+    setNewProjectByWs((p) => ({ ...p, [wsId]: "" }));
     await loadAll();
-  }
-
-  async function deleteTask(taskId: string) {
-    if (!isAdmin) return alert("只有 admin 可以刪除任務");
-    const del = await supabase.from("tasks").delete().eq("id", taskId);
-    if (del.error) return alert(`刪除失敗：${del.error.message}`);
-    await loadAll();
-  }
-
-  async function toggleDone(task: Task) {
-    const upd = await supabase.from("tasks").update({ done: !task.done }).eq("id", task.id);
-    if (upd.error) return alert(`更新失敗：${upd.error.message}`);
-    await loadAll();
-  }
-
-  // ✅ 真拖曳：Projects
-  async function onDragEndProjects(e: DragEndEvent) {
-    const { active, over } = e;
-    if (!over || active.id === over.id) return;
-
-    const oldIndex = projects.findIndex((p) => p.id === active.id);
-    const newIndex = projects.findIndex((p) => p.id === over.id);
-    if (oldIndex < 0 || newIndex < 0) return;
-
-    const next = arrayMove(projects, oldIndex, newIndex).map((p, idx) => ({
-      ...p,
-      sort_order: idx,
-    }));
-    setProjects(next);
-
-    // 寫回 DB
-    await Promise.all(
-      next.map((p) =>
-        supabase.from("projects").update({ sort_order: p.sort_order }).eq("id", p.id)
-      )
-    );
-  }
-
-  // ✅ 真拖曳：Tasks（每個 project 各自拖）
-  async function onDragEndTasks(projectId: string, e: DragEndEvent) {
-    const { active, over } = e;
-    if (!over || active.id === over.id) return;
-
-    const arr = tasksByProject.get(projectId) ?? [];
-    const oldIndex = arr.findIndex((t) => t.id === active.id);
-    const newIndex = arr.findIndex((t) => t.id === over.id);
-    if (oldIndex < 0 || newIndex < 0) return;
-
-    const nextArr = arrayMove(arr, oldIndex, newIndex).map((t, idx) => ({
-      ...t,
-      sort_order: idx,
-    }));
-
-    // 更新本地 tasks（保持其他 tasks 不動）
-    setTasks((prev) => {
-      const others = prev.filter((t) => t.project_id !== projectId);
-      return [...others, ...nextArr];
-    });
-
-    await Promise.all(
-      nextArr.map((t) =>
-        supabase.from("tasks").update({ sort_order: t.sort_order }).eq("id", t.id)
-      )
-    );
-  }
-
-  async function logout() {
-    await supabase.auth.signOut();
-    location.href = "/login";
-  }
-
-  const card: React.CSSProperties = {
-    border: "1px solid #e5e7eb",
-    borderRadius: 18,
-    padding: 18,
-    background: "white",
   };
 
-  const pill: React.CSSProperties = {
-    border: "1px solid #e5e7eb",
-    borderRadius: 999,
-    padding: "8px 12px",
-    background: "white",
-    cursor: "pointer",
-    fontSize: 14,
+  const deleteProject = async (projectId: string) => {
+    if (!isAdmin) return alert("只有 admin 可以刪除");
+    const ok = confirm("確定要刪除這個 Project？（會連同底下 Tasks 一起刪）");
+    if (!ok) return;
+
+    const { error } = await supabase.from("projects").delete().eq("id", projectId);
+    if (error) return alert(error.message);
+    await loadAll();
   };
+
+  const createTask = async (projectId: string) => {
+    if (!isAdmin) return alert("只有 admin 可以新增/編輯（由 RLS 控制）");
+
+    const title = (newTaskTitleByProject[projectId] || "").trim();
+    const due = (newTaskDueByProject[projectId] || "").trim();
+    const assignee = (newTaskAssigneeByProject[projectId] || "").trim();
+
+    if (!title) return alert("請填任務名稱");
+    if (!assignee) return alert("負責人必填");
+
+    const siblings = tasks.filter((t) => t.project_id === projectId);
+    const maxOrder = siblings.reduce((m, t) => Math.max(m, t.sort_order ?? 0), 0);
+
+    const payload: any = {
+      project_id: projectId,
+      title,
+      assignee,
+      done: false,
+      sort_order: maxOrder + 1,
+    };
+    if (due) payload.due_date = due;
+
+    const { error } = await supabase.from("tasks").insert(payload);
+    if (error) return alert(error.message);
+
+    setNewTaskTitleByProject((p) => ({ ...p, [projectId]: "" }));
+    setNewTaskDueByProject((p) => ({ ...p, [projectId]: "" }));
+    setNewTaskAssigneeByProject((p) => ({ ...p, [projectId]: "" }));
+    await loadAll();
+  };
+
+  const deleteTask = async (taskId: string) => {
+    if (!isAdmin) return alert("只有 admin 可以刪除");
+    const ok = confirm("確定要刪除這個 Task？");
+    if (!ok) return;
+
+    const { error } = await supabase.from("tasks").delete().eq("id", taskId);
+    if (error) return alert(error.message);
+    await loadAll();
+  };
+
+  const toggleDone = async (task: Task) => {
+    if (!isAdmin) return;
+    const { error } = await supabase
+      .from("tasks")
+      .update({ done: !task.done })
+      .eq("id", task.id);
+    if (error) return alert(error.message);
+    await loadAll();
+  };
+
+  // ✅ 5) 本週里程碑：顯示「日期 + 星期」+ 逾期
+  const weekly = useMemo(() => {
+    const now = new Date();
+    const day = now.getDay(); // 0 Sun
+    const diffToMon = (day + 6) % 7;
+    const mon = new Date(now);
+    mon.setDate(now.getDate() - diffToMon);
+    mon.setHours(0, 0, 0, 0);
+    const nextMon = new Date(mon);
+    nextMon.setDate(mon.getDate() + 7);
+
+    const isOverdue = (d: string) => {
+      const dt = new Date(d + "T00:00:00");
+      return dt < mon;
+    };
+
+    const inWeek = (d: string) => {
+      const dt = new Date(d + "T00:00:00");
+      return dt >= mon && dt < nextMon;
+    };
+
+    return tasks
+      .filter((t) => !t.done && !!t.due_date)
+      .filter((t) => inWeek(t.due_date!) || isOverdue(t.due_date!))
+      .map((t) => {
+        const p = t.project_id ? projectById.get(t.project_id) : undefined;
+        const wsName =
+          p?.workstream_id ? wsById.get(p.workstream_id)?.name : undefined;
+
+        const wsColor = getWsColorByProjectId(t.project_id);
+
+        const dd = new Date((t.due_date || ymd(new Date())) + "T00:00:00");
+        return {
+          ...t,
+          projectName: p?.name || "（未分類 Project）",
+          workstreamName: wsName || "（未分類）",
+          isOverdue: t.due_date ? isOverdue(t.due_date) : false,
+          dayLabel: `${t.due_date}（${weekdayShort(dd)}）`,
+          wsColor,
+        };
+      })
+      .sort((a, b) => (a.due_date || "").localeCompare(b.due_date || ""));
+  }, [tasks, projectById, wsById]);
+
+  // ✅ 4) 月曆：未完成 + due_date（顏色依 workstream）
+  const monthGrid = useMemo(() => {
+    const first = new Date(monthCursor.getFullYear(), monthCursor.getMonth(), 1);
+    const last = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 0);
+    const firstDow = (first.getDay() + 6) % 7; // Mon=0 ... Sun=6
+    const daysInMonth = last.getDate();
+
+    const cells: Array<{ key: string; date: string | null }> = [];
+    for (let i = 0; i < firstDow; i++) cells.push({ key: `b-${i}`, date: null });
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dt = new Date(monthCursor.getFullYear(), monthCursor.getMonth(), d);
+      cells.push({ key: `d-${d}`, date: ymd(dt) });
+    }
+    while (cells.length % 7 !== 0) cells.push({ key: `t-${cells.length}`, date: null });
+
+    const byDate = new Map<string, Array<{ id: string; title: string; color: string }>>();
+    for (const t of tasks) {
+      if (t.done) continue;
+      if (!t.due_date) continue;
+      const color = getWsColorByProjectId(t.project_id);
+      if (!byDate.has(t.due_date)) byDate.set(t.due_date, []);
+      byDate.get(t.due_date)!.push({ id: t.id, title: t.title, color });
+    }
+
+    // 每天最多顯示 8 個點點
+    for (const [k, arr] of byDate.entries()) byDate.set(k, arr.slice(0, 8));
+
+    return { cells, byDate, daysInMonth };
+  }, [monthCursor, tasks, projects, workstreams, projectById, wsById]);
 
   return (
-    <div style={{ background: "#f6f7f9", minHeight: "100vh", padding: 22, fontFamily: "system-ui" }}>
-      <div style={{ maxWidth: 1180, margin: "0 auto" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+    <div style={{ fontFamily: "system-ui", background: "#fafafa", minHeight: "100vh" }}>
+      <div style={{ maxWidth: 1100, margin: "0 auto", padding: 24 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16 }}>
           <div>
-            <div style={{ fontSize: 44, fontWeight: 900 }}>2026__媒觀執行追蹤</div>
-            <div style={{ opacity: 0.75, marginTop: 6 }}>
-              目前登入：<b>{email || "—"}</b>　｜　角色：<b>{role || "—"}</b>
-            </div>
-            <div style={{ display: "flex", gap: 10, marginTop: 10, flexWrap: "wrap" }}>
-              <span style={{ ...pill, cursor: "default" }}>✅ 本週時間軸只顯示：!done && due_date</span>
-              <span style={{ ...pill, cursor: "default" }}>✅ 月曆只在截止日顯示點點</span>
+            <div style={{ fontSize: 36, fontWeight: 1000, letterSpacing: -0.5 }}>MWKIDS Tracker</div>
+            <div style={{ marginTop: 6, opacity: 0.75 }}>
+              目前登入：<b>{me?.email || "..."}</b> ｜ 角色：<b>{me?.role || "..."}</b>
+              <span style={{ marginLeft: 10, fontSize: 12 }}>
+                （reviewer：只能看｜admin：可新增/編輯）
+              </span>
             </div>
           </div>
           <div style={{ display: "flex", gap: 10 }}>
-            <button style={{ ...pill }} onClick={loadAll}>重新載入</button>
-            <button style={{ ...pill }} onClick={logout}>登出</button>
+            <button style={btn} onClick={loadAll}>重新載入</button>
+            <button style={btn} onClick={logout}>登出</button>
           </div>
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 16, marginTop: 16 }}>
-          {/* LEFT */}
-          <div style={card}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div>
-                <div style={{ fontSize: 20, fontWeight: 900 }}>甘特圖</div>
-                <div style={{ opacity: 0.6, fontSize: 13, marginTop: 2 }}>大分類（Workstream）</div>
-              </div>
-              <div style={{ opacity: 0.6, fontSize: 12 }}>（固定，可編輯版可加）</div>
+        {/* ✅ 4) 里程碑月曆（可切上/下個月，點點顏色跟組別一致） */}
+        <div style={{ marginTop: 18, ...card }}>
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+            <div style={{ fontWeight: 1000, fontSize: 18 }}>
+              里程碑月曆（截止日點點｜未完成）
             </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
-              {workstreams
-                .slice()
-                .sort((a, b) => (a.sort_order ?? 999) - (b.sort_order ?? 999))
-                .map((w) => {
-                  const c = WS_COLORS[w.name] ?? "#111";
-                  return (
-                    <div key={w.id} style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                      <span style={{ width: 12, height: 12, borderRadius: 999, background: c, display: "inline-block" }} />
-                      <span style={{ fontWeight: 800 }}>{w.name}</span>
-                    </div>
-                  );
-                })}
-            </div>
-
-            <div style={{ marginTop: 18, opacity: 0.6, fontSize: 13 }}>里程碑月曆（截止日點點）</div>
-
-            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 10 }}>
-              <button style={pill} onClick={() => setMonthBase((d) => addMonths(d, -1))}>← 上個月</button>
-              <div style={{ fontWeight: 900, alignSelf: "center" }}>
-                {monthBase.getFullYear()}/{String(monthBase.getMonth() + 1).padStart(2, "0")}
-              </div>
-              <button style={pill} onClick={() => setMonthBase((d) => addMonths(d, 1))}>下個月 →</button>
-            </div>
-
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 8, marginTop: 12 }}>
-              {monthDays.map((d) => {
-                const key = formatYMD(d);
-                const dots = milestoneDots.get(key) ?? [];
-                return (
-                  <div
-                    key={key}
-                    style={{
-                      border: "1px solid #eee",
-                      borderRadius: 14,
-                      minHeight: 54,
-                      padding: 8,
-                      background: "white",
-                    }}
-                    title={key}
-                  >
-                    <div style={{ fontWeight: 900, fontSize: 13 }}>{d.getDate()}</div>
-                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 6 }}>
-                      {dots.slice(0, 6).map((x, i) => (
-                        <span
-                          key={`${key}-${x.color}-${i}`}
-                          style={{
-                            width: 8,
-                            height: 8,
-                            borderRadius: 999,
-                            background: x.color,
-                            display: "inline-block",
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* RIGHT */}
-          <div style={{ ...card, minHeight: 640 }}>
-            <div style={{ fontSize: 20, fontWeight: 900 }}>工作項目</div>
-
-            <div style={{ display: "flex", gap: 10, marginTop: 12, alignItems: "center" }}>
-              <input
-                value={newProjectTitle}
-                onChange={(e) => setNewProjectTitle(e.target.value)}
-                placeholder="新增專案（Project）名稱"
-                style={{
-                  flex: 1,
-                  padding: 12,
-                  borderRadius: 14,
-                  border: "1px solid #e5e7eb",
-                }}
-              />
-              <select
-                value={newProjectWs}
-                onChange={(e) => setNewProjectWs(e.target.value)}
-                style={{
-                  width: 160,
-                  padding: 12,
-                  borderRadius: 14,
-                  border: "1px solid #e5e7eb",
-                  background: "white",
-                }}
-              >
-                <option value="">選 Workstream（必填）</option>
-                {workstreams.map((w) => (
-                  <option key={w.id} value={w.id}>{w.name}</option>
-                ))}
-              </select>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
               <button
-                onClick={addProject}
-                style={{
-                  padding: "12px 16px",
-                  borderRadius: 14,
-                  border: "1px solid #111",
-                  background: "#111",
-                  color: "white",
-                  fontWeight: 900,
-                  cursor: "pointer",
-                  whiteSpace: "nowrap",
-                }}
+                style={smallBtn}
+                onClick={() =>
+                  setMonthCursor((d) => new Date(d.getFullYear(), d.getMonth() - 1, 1))
+                }
               >
-                新增專案
+                上一個月
+              </button>
+              <div style={{ fontWeight: 900 }}>
+                {monthCursor.getFullYear()} / {String(monthCursor.getMonth() + 1).padStart(2, "0")}
+              </div>
+              <button
+                style={smallBtn}
+                onClick={() =>
+                  setMonthCursor((d) => new Date(d.getFullYear(), d.getMonth() + 1, 1))
+                }
+              >
+                下一個月
               </button>
             </div>
+          </div>
 
-            <div style={{ opacity: 0.65, fontSize: 13, marginTop: 8 }}>
-              Project 可拖曳排序；Task 也可在各 Project 內拖曳排序（會寫回資料庫）。
-            </div>
-
-            <div style={{ marginTop: 16 }}>
-              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEndProjects}>
-                <SortableContext items={projects.map((p) => p.id)} strategy={verticalListSortingStrategy}>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                    {projects.map((p) => (
-                      <SortableRow key={p.id} id={p.id}>
-                        {({ setNodeRef, attributes, listeners, transform, transition, isDragging }) => (
-                          <div
-                            ref={setNodeRef}
-                            style={{
-                              border: "1px solid #e5e7eb",
-                              borderRadius: 18,
-                              padding: 14,
-                              background: "white",
-                              boxShadow: isDragging ? "0 10px 24px rgba(0,0,0,0.12)" : "none",
-                              transform: CSS.Transform.toString(transform),
-                              transition,
-                            }}
-                          >
-                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                                {/* 拖曳把手 */}
-                                <button
-                                  {...attributes}
-                                  {...listeners}
-                                  style={{
-                                    width: 14,
-                                    height: 14,
-                                    borderRadius: 999,
-                                    border: "none",
-                                    background: colorByWsId(p.workstream_id),
-                                    cursor: "grab",
-                                  }}
-                                  title="拖我排序"
-                                />
-                                <div>
-                                  <div style={{ fontWeight: 900, fontSize: 16 }}>{p.title} <span style={{ opacity: 0.5, fontWeight: 700 }}>(Project)</span></div>
-                                  <div style={{ opacity: 0.6, fontSize: 13 }}>任務會收在這個專案底下</div>
-                                </div>
-                              </div>
-                              <button
-                                onClick={() => deleteProject(p.id)}
-                                style={{
-                                  border: "1px solid #e5e7eb",
-                                  borderRadius: 12,
-                                  padding: "8px 10px",
-                                  background: "white",
-                                  cursor: "pointer",
-                                }}
-                                title="刪除 Project（會提示）"
-                              >
-                                🗑️
-                              </button>
-                            </div>
-
-                            {/* ✅ 每個 Project 獨立 Task 輸入（不連動） */}
-                            <div style={{ display: "grid", gridTemplateColumns: "1fr 160px 160px 140px", gap: 10, marginTop: 12 }}>
-                              <input
-                                value={(draftTask[p.id]?.title ?? "")}
-                                onChange={(e) =>
-                                  setDraftTask((prev) => ({
-                                    ...prev,
-                                    [p.id]: {
-                                      title: e.target.value,
-                                      due_date: prev[p.id]?.due_date ?? "",
-                                      assignee: prev[p.id]?.assignee ?? "",
-                                    },
-                                  }))
-                                }
-                                placeholder="新增任務（Task）"
-                                style={{ padding: 12, borderRadius: 14, border: "1px solid #e5e7eb" }}
-                              />
-                              <input
-                                type="date"
-                                value={(draftTask[p.id]?.due_date ?? "")}
-                                onChange={(e) =>
-                                  setDraftTask((prev) => ({
-                                    ...prev,
-                                    [p.id]: {
-                                      title: prev[p.id]?.title ?? "",
-                                      due_date: e.target.value,
-                                      assignee: prev[p.id]?.assignee ?? "",
-                                    },
-                                  }))
-                                }
-                                style={{ padding: 12, borderRadius: 14, border: "1px solid #e5e7eb" }}
-                              />
-                              <input
-                                value={(draftTask[p.id]?.assignee ?? "")}
-                                onChange={(e) =>
-                                  setDraftTask((prev) => ({
-                                    ...prev,
-                                    [p.id]: {
-                                      title: prev[p.id]?.title ?? "",
-                                      due_date: prev[p.id]?.due_date ?? "",
-                                      assignee: e.target.value,
-                                    },
-                                  }))
-                                }
-                                placeholder="負責人（必填）"
-                                style={{ padding: 12, borderRadius: 14, border: "1px solid #e5e7eb" }}
-                              />
-                              <button
-                                onClick={() => addTask(p.id)}
-                                style={{
-                                  padding: "12px 14px",
-                                  borderRadius: 14,
-                                  border: "1px solid #111",
-                                  background: "white",
-                                  cursor: "pointer",
-                                  fontWeight: 900,
-                                }}
-                              >
-                                新增任務
-                              </button>
-                            </div>
-
-                            {/* Tasks list with true drag */}
-                            <div style={{ marginTop: 12 }}>
-                              <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={(e) => onDragEndTasks(p.id, e)}>
-                                <SortableContext
-                                  items={(tasksByProject.get(p.id) ?? []).map((t) => t.id)}
-                                  strategy={verticalListSortingStrategy}
-                                >
-                                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                                    {(tasksByProject.get(p.id) ?? []).map((t) => (
-                                      <SortableRow key={t.id} id={t.id}>
-                                        {({ setNodeRef, attributes, listeners, transform, transition, isDragging }) => (
-                                          <div
-                                            ref={setNodeRef}
-                                            style={{
-                                              border: "1px solid #eef0f3",
-                                              borderRadius: 16,
-                                              padding: 12,
-                                              background: "white",
-                                              transform: CSS.Transform.toString(transform),
-                                              transition,
-                                              boxShadow: isDragging ? "0 10px 24px rgba(0,0,0,0.10)" : "none",
-                                            }}
-                                          >
-                                            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
-                                              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                                                <button
-                                                  {...attributes}
-                                                  {...listeners}
-                                                  style={{
-                                                    width: 12,
-                                                    height: 12,
-                                                    borderRadius: 999,
-                                                    border: "none",
-                                                    background: colorByWsId(p.workstream_id),
-                                                    cursor: "grab",
-                                                  }}
-                                                  title="拖我排序"
-                                                />
-                                                <input
-                                                  type="checkbox"
-                                                  checked={!!t.done}
-                                                  onChange={() => toggleDone(t)}
-                                                  style={{ width: 18, height: 18 }}
-                                                />
-                                                <div>
-                                                  <div style={{ fontWeight: 900 }}>
-                                                    {t.title} <span style={{ opacity: 0.5 }}>(Task)</span>
-                                                  </div>
-                                                  <div style={{ opacity: 0.7, fontSize: 13 }}>
-                                                    截止：{t.due_date ?? "—"}　｜　負責：{t.assignee ?? "—"}
-                                                  </div>
-                                                </div>
-                                              </div>
-                                              <button
-                                                onClick={() => deleteTask(t.id)}
-                                                style={{
-                                                  border: "1px solid #e5e7eb",
-                                                  borderRadius: 12,
-                                                  padding: "8px 10px",
-                                                  background: "white",
-                                                  cursor: "pointer",
-                                                }}
-                                                title="刪除 Task"
-                                              >
-                                                🗑️
-                                              </button>
-                                            </div>
-                                          </div>
-                                        )}
-                                      </SortableRow>
-                                    ))}
-                                    {(tasksByProject.get(p.id) ?? []).length === 0 && (
-                                      <div style={{ opacity: 0.6, fontSize: 13, padding: 10 }}>
-                                        還沒有任務，先加一個「經費表 / 贊助方案」之類的 ✅
-                                      </div>
-                                    )}
-                                  </div>
-                                </SortableContext>
-                              </DndContext>
-                            </div>
-                          </div>
-                        )}
-                      </SortableRow>
-                    ))}
-                    {projects.length === 0 && (
-                      <div style={{ opacity: 0.65, padding: 10 }}>
-                        目前沒有專案。admin 可以先新增一個測試 ✅
-                      </div>
-                    )}
+          <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 8 }}>
+            {["一", "二", "三", "四", "五", "六", "日"].map((d) => (
+              <div key={d} style={{ fontSize: 12, opacity: 0.7, fontWeight: 900, textAlign: "center" }}>
+                {d}
+              </div>
+            ))}
+            {monthGrid.cells.map((c) => {
+              const dots = c.date ? monthGrid.byDate.get(c.date) || [] : [];
+              return (
+                <div
+                  key={c.key}
+                  style={{
+                    minHeight: 62,
+                    border: "1px solid #eee",
+                    borderRadius: 12,
+                    padding: 8,
+                    background: c.date ? "#fff" : "transparent",
+                    opacity: c.date ? 1 : 0.35,
+                  }}
+                >
+                  <div style={{ fontSize: 12, fontWeight: 900, opacity: 0.75 }}>
+                    {c.date ? Number(c.date.slice(-2)) : ""}
                   </div>
-                </SortableContext>
-              </DndContext>
+                  <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 6 }}>
+                    {dots.map((d) => (
+                      <span
+                        key={d.id}
+                        title={d.title}
+                        style={{
+                          width: 10,
+                          height: 10,
+                          borderRadius: 999,
+                          display: "inline-block",
+                          background: d.color,
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+            點點顏色 = Workstream 顏色；滑過點點可看到 Task 標題。
+          </div>
+        </div>
+
+        {/* ✅ 5) 本週里程碑（未完成＋本週/逾期）：含日期/星期 */}
+        <div style={{ marginTop: 18, ...card }}>
+          <div style={{ fontWeight: 1000, fontSize: 18, marginBottom: 10 }}>本週里程碑（未完成＋本週/逾期）</div>
+          {weekly.length === 0 ? (
+            <div style={{ opacity: 0.7 }}>目前沒有本週/逾期的未完成任務 ✅</div>
+          ) : (
+            <div style={{ display: "grid", gap: 10 }}>
+              {weekly.map((t) => (
+                <div
+                  key={t.id}
+                  style={{
+                    border: "1px solid #eee",
+                    borderLeft: `6px solid ${t.wsColor || "#111"}`,
+                    borderRadius: 14,
+                    padding: 12,
+                    background: "#fff",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
+                    <div>
+                      <div style={{ fontWeight: 950 }}>
+                        {t.title}{" "}
+                        {t.isOverdue && (
+                          <span style={{ marginLeft: 8, fontSize: 12, padding: "2px 8px", border: "1px solid #111", borderRadius: 999 }}>
+                            逾期
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ fontSize: 13, opacity: 0.75, marginTop: 2 }}>
+                        due：{t.dayLabel || "-"} ｜ 負責人：{t.assignee || "-"} ｜ {t.workstreamName} / {t.projectName}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* 工作區 */}
+        <div style={{ marginTop: 18, display: "grid", gridTemplateColumns: "1fr", gap: 16 }}>
+          {/* 新增 Workstream */}
+          <div style={card}>
+            <div style={{ fontWeight: 1000, fontSize: 18, marginBottom: 10 }}>大分類（Workstream）</div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <input
+                value={wsName}
+                onChange={(e) => setWsName(e.target.value)}
+                placeholder="例如：兒少組"
+                style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd", minWidth: 240, flex: 1 }}
+              />
+              <button style={{ ...btn, opacity: isAdmin ? 1 : 0.4 }} onClick={createWorkstream}>
+                新增 Workstream
+              </button>
             </div>
           </div>
+
+          {/* Workstreams 列表（依 sort_order） */}
+          {workstreams
+            .slice()
+            .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+            .map((ws) => {
+              const wsProjects = projects
+                .filter((p) => p.workstream_id === ws.id)
+                .slice()
+                .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+
+              return (
+                <div key={ws.id} style={card}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                      <span style={{ width: 12, height: 12, borderRadius: 999, background: ws.color || "#111", display: "inline-block" }} />
+                      <div style={{ fontWeight: 1000, fontSize: 20 }}>{ws.name}</div>
+                    </div>
+                    <button
+                      style={{ ...btn, opacity: isAdmin ? 1 : 0.3 }}
+                      onClick={() => deleteWorkstream(ws.id)}
+                    >
+                      刪除 Workstream
+                    </button>
+                  </div>
+
+                  {/* 新增 Project */}
+                  <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    <input
+                      value={newProjectByWs[ws.id] || ""}
+                      onChange={(e) => setNewProjectByWs((p) => ({ ...p, [ws.id]: e.target.value }))}
+                      placeholder="新增 Project 名稱（例如：企劃書）"
+                      style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd", minWidth: 280, flex: 1 }}
+                    />
+                    <button style={{ ...btn, opacity: isAdmin ? 1 : 0.3 }} onClick={() => createProject(ws.id)}>
+                      新增 Project
+                    </button>
+                  </div>
+
+                  {/* Projects */}
+                  <div style={{ marginTop: 14, display: "grid", gap: 12 }}>
+                    {wsProjects.length === 0 ? (
+                      <div style={{ opacity: 0.7 }}>這個 Workstream 目前沒有 Project。</div>
+                    ) : (
+                      wsProjects.map((p) => {
+                        const pTasks = tasks
+                          .filter((t) => t.project_id === p.id)
+                          .slice()
+                          .sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0));
+
+                        return (
+                          <div key={p.id} style={{ border: "1px solid #eee", borderRadius: 16, padding: 14, background: "#fff" }}>
+                            <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                              <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+                                <span style={{ width: 10, height: 10, borderRadius: 999, background: ws.color || "#111", display: "inline-block" }} />
+                                <div>
+                                  <div style={{ fontWeight: 1000, fontSize: 16 }}>{p.name}</div>
+                                  <div style={{ fontSize: 13, opacity: 0.7 }}>
+                                    status：{p.status || "-"}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                <button style={{ ...smallBtn, opacity: isAdmin ? 1 : 0.3 }} onClick={() => moveProject(p.id, -1)}>↑</button>
+                                <button style={{ ...smallBtn, opacity: isAdmin ? 1 : 0.3 }} onClick={() => moveProject(p.id, 1)}>↓</button>
+                                <button style={{ ...btn, opacity: isAdmin ? 1 : 0.3 }} onClick={() => deleteProject(p.id)}>
+                                  刪除 Project
+                                </button>
+                              </div>
+                            </div>
+
+                            {/* 新增 Task（單一 project 獨立輸入 ✅ 你已修好，我保留） */}
+                            <div style={{ marginTop: 12, display: "grid", gridTemplateColumns: "1fr 160px 160px 120px", gap: 10 }}>
+                              <input
+                                value={newTaskTitleByProject[p.id] || ""}
+                                onChange={(e) => setNewTaskTitleByProject((s) => ({ ...s, [p.id]: e.target.value }))}
+                                placeholder="新增 Task（例如：經費表）"
+                                style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
+                              />
+                              <input
+                                value={newTaskDueByProject[p.id] || ""}
+                                onChange={(e) => setNewTaskDueByProject((s) => ({ ...s, [p.id]: e.target.value }))}
+                                placeholder="due_date"
+                                type="date"
+                                style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
+                              />
+                              <input
+                                value={newTaskAssigneeByProject[p.id] || ""}
+                                onChange={(e) => setNewTaskAssigneeByProject((s) => ({ ...s, [p.id]: e.target.value }))}
+                                placeholder="負責人（必填）"
+                                style={{ padding: 10, borderRadius: 12, border: "1px solid #ddd" }}
+                              />
+                              <button style={{ ...btn, opacity: isAdmin ? 1 : 0.3 }} onClick={() => createTask(p.id)}>
+                                新增 Task
+                              </button>
+                            </div>
+
+                            {/* Task 列表 */}
+                            <div style={{ marginTop: 12, display: "grid", gap: 8 }}>
+                              {pTasks.length === 0 ? (
+                                <div style={{ opacity: 0.7 }}>尚無 Tasks</div>
+                              ) : (
+                                pTasks.map((t) => {
+                                  const dd = t.due_date ? new Date(t.due_date + "T00:00:00") : null;
+                                  const dueLabel = t.due_date ? `${t.due_date}（${weekdayShort(dd!)}）` : "-";
+                                  return (
+                                    <div
+                                      key={t.id}
+                                      style={{
+                                        border: "1px solid #f0f0f0",
+                                        borderLeft: `6px solid ${ws.color || "#111"}`,
+                                        borderRadius: 14,
+                                        padding: 10,
+                                        display: "flex",
+                                        justifyContent: "space-between",
+                                        gap: 10,
+                                        alignItems: "center",
+                                      }}
+                                    >
+                                      <label style={{ display: "flex", gap: 10, alignItems: "center", flex: 1 }}>
+                                        <input
+                                          type="checkbox"
+                                          checked={!!t.done}
+                                          onChange={() => toggleDone(t)}
+                                          disabled={!isAdmin}
+                                        />
+                                        <div>
+                                          <div style={{ fontWeight: 900, textDecoration: t.done ? "line-through" : "none" }}>
+                                            {t.title}
+                                          </div>
+                                          <div style={{ fontSize: 12, opacity: 0.7 }}>
+                                            due：{dueLabel} ｜ 負責人：{t.assignee || "-"}
+                                          </div>
+                                        </div>
+                                      </label>
+
+                                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                                        <button style={{ ...smallBtn, opacity: isAdmin ? 1 : 0.2 }} onClick={() => moveTask(t.id, -1)}>↑</button>
+                                        <button style={{ ...smallBtn, opacity: isAdmin ? 1 : 0.2 }} onClick={() => moveTask(t.id, 1)}>↓</button>
+                                        <button
+                                          style={{ ...btn, padding: "8px 10px", opacity: isAdmin ? 1 : 0.2 }}
+                                          onClick={() => deleteTask(t.id)}
+                                        >
+                                          刪除
+                                        </button>
+                                      </div>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+        </div>
+
+        <div style={{ marginTop: 18, opacity: 0.7, fontSize: 12 }}>
+          小提示：reviewer 的「只能看」要以 Supabase RLS 為準；前端這裡只是先做基本 UI 限制。
         </div>
       </div>
     </div>
